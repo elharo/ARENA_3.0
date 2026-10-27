@@ -19,7 +19,7 @@ safetensors
 openai>=1.56.2,<4
 sentence-transformers
 peft
-liger-kernel  # [2.4.2] RLVR: optional fused kernels for Qwen3 (faster learning phase)
+# liger-kernel  # [2.4.2] RLVR: optional fused kernels for Qwen3 (faster learning phase)
 bitsandbytes
 
 # Data manipulation and analysis
@@ -102,7 +102,7 @@ mujoco
 # brax only declares `jax>=0.4.6` (no upper bound). jax 0.11.2 (needs Python >= 3.12) runs
 # BraxEnvs on the GPU next to torch 2.14 (both CUDA 13). Brax's own JAX trainers
 # (brax.training.agents.*) call the removed jax.device_put_replicated, but we never import them.
-jax[cuda13]==0.11.2
+jax==0.11.2
 brax==0.14.2
 # Vectorised Atari emulators (C++) for the Atari bonus section's AtariEnvs.
 envpool==1.2.5
