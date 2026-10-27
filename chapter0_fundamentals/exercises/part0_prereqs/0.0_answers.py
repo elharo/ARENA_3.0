@@ -436,3 +436,34 @@ tests.test_batched_cross_entropy_loss(batched_cross_entropy_loss)
 
 
 # %%
+# I1
+
+def collect_rows(matrix: Tensor, row_indexes: Tensor) -> Tensor:
+    """Return a 2D matrix whose rows are taken from the input matrix in order according to row_indexes.
+
+    matrix: shape (m, n)
+    row_indexes: shape (k,). Each value is an integer in [0..m).
+
+    Return: shape (k, n). out[i] is matrix[row_indexes[i]].
+    """
+
+    return matrix[row_indexes]
+
+
+tests.test_collect_rows(collect_rows)
+# %%
+#I2
+
+def collect_columns(matrix: Tensor, column_indexes: Tensor) -> Tensor:
+    """Return a 2D matrix whose columns are taken from the input matrix in order according to column_indexes.
+
+    matrix: shape (m, n)
+    column_indexes: shape (k,). Each value is an integer in [0..n).
+
+    Return: shape (m, k). out[:, i] is matrix[:, column_indexes[i]].
+    """
+    assert column_indexes.max() < matrix.shape[1]
+    return matrix[:, column_indexes]
+
+tests.test_collect_columns(collect_columns)
+# %%
