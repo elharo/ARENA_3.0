@@ -324,9 +324,6 @@ def integer_array_indexing(matrix: Tensor, coords: Tensor) -> Tensor:
 
     Return: (batch, )
     """
-
-    print(matrix)
-    print(coords)
     result = matrix[tuple(coords.T)]
     return result
 
@@ -351,22 +348,91 @@ def batched_logsumexp(matrix: Tensor) -> Tensor:
 
     # https://leimao.github.io/blog/LogSumExp/
     #  Hint: out[i] = log(sum(exp(row i))); reduce over the last dim.
-    print(matrix)
     return einops.reduce(matrix, 'i j -> i', logsumexp)
 
-def logsumexp(vector: Tensor, *args) -> float:
-    print('vector', vector)
-    a = t.log(vector).max()
-    print('a', a)
-    i1 = vector - a
-    print('i1', i1)
-    i2 = t.log(i1)
-    print('i2', i2)
-    i3 = t.exp(i2)
-    print('i3', i3)
-    return a + i3.sum().item()
-
+def logsumexp(matrix: Tensor, *args) -> float:
+    c = matrix.max(dim=-1, keepdim=True).values
+    return c.squeeze(-1) + t.log(t.sum(t.exp(matrix - c), dim=-1))
 
 tests.test_batched_logsumexp(batched_logsumexp)
+
+# %%
+#H2
+def batched_softmax(matrix: Tensor) -> Tensor:
+    """For each row of the matrix, compute softmax(row).
+
+    Do this without using PyTorch's softmax function.
+    Instead, use the definition of softmax: https://en.wikipedia.org/wiki/Softmax_function
+
+    matrix: shape (batch, n)
+
+    Return: (batch, n). For each i, out[i] should sum to 1.
+    """
+    return einops.reduce(matrix, 'i j -> i', softmax)
+
+
+def softmax(matrix: Tensor, *args) -> Tensor:
+    exponentiated = t.exp(matrix)
+    bottom = t.sum(exponentiated, dim=-1)
+    bottom_tensor = bottom.unsqueeze(-1)
+    result = exponentiated / bottom_tensor
+
+    return result
+
+
+tests.test_batched_softmax(batched_softmax)
+
+# %%
+# H3
+def batched_logsoftmax(matrix: Tensor) -> Tensor:
+    """Compute log(softmax(row)) for each row of the matrix.
+
+    matrix: shape (batch, n)
+
+    Return: (batch, n).
+
+    Do this without using PyTorch's logsoftmax function.
+    For each row, subtract the maximum first to avoid overflow if the row contains large values.
+    """
+    return einops.reduce(matrix, 'i j -> i', logsoftmax)
+
+
+def logsoftmax(matrix: Tensor, *args) -> Tensor:
+    c = matrix.max(dim=-1, keepdim=True).values
+    normalized_matrix = matrix - c
+    exponentiated = t.exp(normalized_matrix)
+    bottom = t.sum(exponentiated, dim=-1)
+    log_bottom = t.log(bottom).unsqueeze(-1)
+    return normalized_matrix - log_bottom
+
+tests.test_batched_logsoftmax(batched_logsoftmax)
+
+# %%
+#H4 
+
+def batched_cross_entropy_loss(logits: Tensor, true_labels: Tensor) -> Tensor:
+    """Compute the cross entropy loss for each example in the batch.
+
+    logits: shape (batch, classes). logits[i][j] is the unnormalized prediction for example i and class j.
+    true_labels: shape (batch, ). true_labels[i] is an integer index representing the true class for example i.
+
+    Return: shape (batch, ). out[i] is the loss for example i.
+
+    Hint: convert the logits to log-probabilities using your batched_logsoftmax from above.
+    Then the loss for an example is just the negative of the log-probability that the model assigned to the true class.
+    Use torch.gather to perform the indexing.
+    """
+    assert logits.shape[0] == true_labels.shape[0]
+    assert true_labels.max() < logits.shape[1]
+    indices = true_labels.unsqueeze(-1)
+    log_probabilities = batched_logsoftmax(logits)
+
+    loss = -t.gather(log_probabilities, index=indices, dim=-1)
+
+    return loss.squeeze(-1)
+
+
+tests.test_batched_cross_entropy_loss(batched_cross_entropy_loss)
+
 
 # %%
