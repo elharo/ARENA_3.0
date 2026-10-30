@@ -67,7 +67,6 @@ def make_rays_1d(num_pixels: int, y_limit: float) -> Tensor:
 
     result[:, 1, 2] = 0
 
-    print(result)
     return result
 
 
@@ -124,7 +123,6 @@ def intersect_rays_1d(
     origins_3d = rays[:,0]
     assert origins_3d.shape == (num_rays,3)
     D_3D = rays[:,1]
-    print(D_3D.shape)
     assert D_3D.shape == (num_rays,3)
 
     L1_3d = segments[:,0]
@@ -179,5 +177,157 @@ def intersect_rays_1d(
 tests.test_intersect_rays_1d(intersect_rays_1d)
 tests.test_intersect_rays_1d_special_case(intersect_rays_1d)
 
+
+# %%
+#
+
+def make_rays_2d(num_pixels_y: int, num_pixels_z: int, y_limit: float, z_limit: float) -> Float[Tensor, "nrays 2 3"]:
+    """
+    num_pixels_y: The number of pixels in the y dimension
+    num_pixels_z: The number of pixels in the z dimension
+
+    y_limit: At x=1, the rays should extend from -y_limit to +y_limit, inclusive of both.
+    z_limit: At x=1, the rays should extend from -z_limit to +z_limit, inclusive of both.
+
+    Returns: shape (num_rays=num_pixels_y * num_pixels_z, num_points=2, num_dims=3).
+    """
+
+    num_rays=num_pixels_y * num_pixels_z
+
+    result = t.zeros(num_rays, 2, 3)
+
+    y = t.linspace(start=-y_limit, end=y_limit, steps=num_pixels_y)
+    z = t.linspace(start=-z_limit, end=z_limit, steps=num_pixels_z)
+
+    y_values, z_values = t.meshgrid(y, z, indexing="ij")
+
+    y_vector = y_values.flatten()
+    z_vector = z_values.flatten()
+
+    assert y_vector.shape == z_vector.shape
+
+    result[:,1,0] = 1
+    result[:,1,1] = y_vector
+    result[:,1,2] = z_vector
+
+    return result
+
+
+tests.test_make_rays_2d(make_rays_2d)
+
+rays_2d = make_rays_2d(10, 10, 0.3, 0.3)
+render_lines_with_plotly(rays_2d)
+
+# %%
+#
+
+Point = Float[Tensor, "points=3"]
+
+
+def triangle_ray_intersects(A: Point, B: Point, C: Point, O: Point, D: Point) -> bool:
+    """
+    A: shape (3,), one vertex of the triangle
+    B: shape (3,), second vertex of the triangle
+    C: shape (3,), third vertex of the triangle
+    O: shape (3,), origin point
+    D: shape (3,), direction point
+
+    Return True if the ray and the triangle intersect.
+    """
+
+    target = A - O
+    c1 = D
+    c2 = A - B
+    c3 = A - C
+
+    assert c1.shape == (3,)
+    assert c2.shape == (3,)
+    assert c3.shape == (3,)
+    matrix = t.stack((c1, c2, c3), dim=-1)
+    s, u, v = t.linalg.solve(matrix, target)
+    return s >= 0 and u >= 0 and v >= 0 and (u + v) <= 1
+
+
+tests.test_triangle_ray_intersects(triangle_ray_intersects)
+
+# %%
+def raytrace_triangle(
+    rays: Float[Tensor, "num_rays rayPoints=2 dims=3"],
+    triangle: Float[Tensor, "trianglePoints=3 dims=3"],
+) -> Bool[Tensor, "num_rays"]:
+    """
+    For each ray, return True if the triangle intersects that ray.
+    """
+
+    """
+    target = A - O
+    c1 = D
+    c2 = A - B
+    c3 = A - C
+
+    matrix = t.stack((c1, c2, c3), dim=-1)
+    s, u, v = t.linalg.solve(matrix, target)
+    return s >= 0 and u >= 0 and v >= 0 and (u + v) <= 1
+    """
+
+    num_rays = rays.shape[0]
+    A = triangle[0]
+    B = triangle[1]
+    C = triangle[2]
+    assert C.shape == (3,)
+
+    O = rays[:, 0]
+    D = rays[:, 1]
+    assert O.shape == D.shape
+    assert O.shape == (num_rays,3)
+
+    c1 = D
+    assert c1.shape == (num_rays,3)
+    c2 = einops.repeat((A - B), "i -> num_rays i", num_rays=num_rays)
+    c3 = einops.repeat((A - C), "i -> num_rays i", num_rays=num_rays)
+
+    matrix = t.stack((c1, c2, c3), dim=-1)
+    determinants = t.linalg.det(matrix)
+    assert determinants.shape == (num_rays,)
+    is_invertible: Bool[Tensor, "num_rays"] = t.abs(determinants) > 1e-6
+
+    target = einops.repeat(A, "i -> num_rays i", num_rays=num_rays) - O
+
+    suv: Float[Tensor, "num_rays 3"] = t.zeros((num_rays, 3), dtype=t.float32)
+    assert suv.shape == (num_rays,3)
+
+    suv[is_invertible] = t.linalg.solve(matrix[is_invertible], target[is_invertible])
+
+    # Check intersection conditions: s >= 0 and u >= 0 and v >= 0 and (u + v) <= 1
+    s = suv[:, 0]
+    u = suv[:, 1]
+    v = suv[:, 2]
+    assert s.shape == (num_rays,)
+    assert u.shape == (num_rays,)
+    assert v.shape == (num_rays,)
+
+    intersections: Bool[Tensor, "num_rays"] = is_invertible & (s >= 0) & (u >= 0) & (v >= 0) & (u + v <= 1) 
+    assert intersections.shape == (num_rays,)
+    return intersections
+
+
+tests.test_raytrace_triangle(raytrace_triangle)
+
+A = t.tensor([1, 0.0, -0.5])
+B = t.tensor([1, -0.5, 0.0])
+C = t.tensor([1, 0.5, 0.5])
+num_pixels_y = num_pixels_z = 15
+y_limit = z_limit = 0.5
+
+# Plot triangle & rays
+test_triangle = t.stack([A, B, C], dim=0)
+rays2d = make_rays_2d(num_pixels_y, num_pixels_z, y_limit, z_limit)
+triangle_lines = t.stack([A, B, C, A, B, C], dim=0).reshape(-1, 2, 3)
+render_lines_with_plotly(rays2d, triangle_lines)
+
+# Calculate and display intersections
+intersects = raytrace_triangle(rays2d, test_triangle)
+img = intersects.reshape(num_pixels_y, num_pixels_z).int()
+imshow(img, origin="lower", width=600, title="Triangle (as intersected by rays)")
 
 # %%
