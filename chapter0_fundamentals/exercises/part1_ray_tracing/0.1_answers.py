@@ -302,9 +302,6 @@ def raytrace_triangle(
     s = suv[:, 0]
     u = suv[:, 1]
     v = suv[:, 2]
-    assert s.shape == (num_rays,)
-    assert u.shape == (num_rays,)
-    assert v.shape == (num_rays,)
 
     intersections: Bool[Tensor, "num_rays"] = is_invertible & (s >= 0) & (u >= 0) & (v >= 0) & (u + v <= 1) 
     assert intersections.shape == (num_rays,)
@@ -330,4 +327,212 @@ intersects = raytrace_triangle(rays2d, test_triangle)
 img = intersects.reshape(num_pixels_y, num_pixels_z).int()
 imshow(img, origin="lower", width=600, title="Triangle (as intersected by rays)")
 
+# %%
+def raytrace_mesh(
+    rays: Float[Tensor, "num_rays rayPoints=2 dims=3"],
+    triangles: Float[Tensor, "num_triangles trianglePoints=3 dims=3"],
+) -> Float[Tensor, "num_rays"]:
+    """
+    For each ray, return the distance to the closest intersecting triangle, or infinity.
+    """
+
+    num_rays = rays.shape[0]
+    num_triangles = triangles.shape[0]
+
+    triangles = einops.repeat(triangles, "num_triangles corners xyz -> num_rays num_triangles corners xyz", num_rays=num_rays)
+
+    assert triangles.shape == (num_rays, num_triangles, 3, 3)
+
+    A = triangles[:, :, 0]
+    B = triangles[:, :, 1]
+    C = triangles[:, :, 2]
+    assert C.shape == (num_rays, num_triangles, 3), f"Expected shape ({num_triangles}, 3), got {C.shape}"
+
+    O = rays[:, 0]
+    D = rays[:, 1]
+    O = einops.repeat(O, "num_rays xyz -> num_rays num_triangles xyz", num_triangles=num_triangles)
+    D = einops.repeat(D, "num_rays xyz -> num_rays num_triangles xyz", num_triangles=num_triangles)
+
+    assert O.shape == (num_rays, num_triangles, 3)
+    assert D.shape == (num_rays, num_triangles, 3)
+
+    c1 = D
+    assert c1.shape == (num_rays, num_triangles, 3)
+    c2 = A - B
+    c3 = A - C
+
+    matrix = t.stack((c1, c2, c3), dim=-1)
+    determinants = t.linalg.det(matrix)
+    assert determinants.shape == (num_rays, num_triangles)
+    not_invertible: Bool[Tensor, "num_rays num_triangles"] = t.abs(determinants) < 1e-6
+    matrix[not_invertible] = t.eye(3) # replace these with an identity matrix for now, we'll remove them later
+
+    target: Float[Tensor, "num_rays num_triangles 3"] = A - O
+    assert target.shape == (num_rays, num_triangles, 3)
+
+    suv: Float[Tensor, "num_rays num_triangles 3"] = t.linalg.solve(matrix, target)
+    s, u, v = suv.unbind(-1)
+    assert s.shape == (num_rays, num_triangles)
+
+    # Scale s by Dx to get the distance along ray
+    x_distance = s * D[..., 0]
+
+    intersections: Bool[Tensor, "num_rays num_triangles"] = ~not_invertible & (s >= 0) & (u >= 0) & (v >= 0) & (u + v <= 1) 
+    x_distance[~intersections] = float("inf") 
+
+    return einops.reduce(x_distance, "num_rays num_triangles -> num_rays", "min")
+
+
+tests.test_raytrace_mesh(raytrace_mesh)
+
+num_pixels_y = 120
+num_pixels_z = 120
+y_limit = z_limit = 1
+
+rays = make_rays_2d(num_pixels_y, num_pixels_z, y_limit, z_limit)
+rays[:, 0] = t.tensor([-2, 0.0, 0.0])
+triangles = t.load(section_dir / "pikachu.pt", weights_only=True)
+dists = raytrace_mesh(rays, triangles)
+intersects = t.isfinite(dists).view(num_pixels_y, num_pixels_z)
+dists_square = dists.view(num_pixels_y, num_pixels_z)
+img = t.stack([intersects, dists_square], dim=0)
+
+fig = px.imshow(img, facet_col=0, origin="lower", color_continuous_scale="magma", width=1000)
+fig.update_layout(coloraxis_showscale=False)
+for i, text in enumerate(["Intersects", "Distance"]):
+    fig.layout.annotations[i]["text"] = text
+fig.show()
+
+# %%
+
+import math 
+
+def rotation_matrix(theta: Float[Tensor, ""]) -> Float[Tensor, "rows cols"]:
+    """
+    Creates a rotation matrix representing a counterclockwise rotation of `theta` around the y-axis.
+    """
+
+    matrix = t.eye(3)
+    matrix[0][0] = math.cos(theta)
+    matrix[0][2] = math.sin(theta)
+    matrix[2][0] = -math.sin(theta)
+    matrix[2][2] = math.cos(theta)
+
+    return matrix
+
+
+tests.test_rotation_matrix(rotation_matrix)
+# %%
+def raytrace_mesh_video(
+    rays: Float[Tensor, "nrays points dim"],
+    triangles: Float[Tensor, "ntriangles points dims"],
+    rotation_matrix: Callable[[float], Float[Tensor, "rows cols"]],
+    raytrace_function: Callable,
+    num_frames: int,
+) -> Bool[Tensor, "nframes nrays"]:
+    """
+    Creates a stack of raytracing results, rotating the triangles by `rotation_matrix` each frame.
+    """
+    result = []
+    theta = t.tensor(2 * t.pi) / num_frames
+    R = rotation_matrix(theta)
+    for _ in tqdm(range(num_frames)):
+        triangles = triangles @ R
+        result.append(raytrace_function(rays, triangles))
+        t.cuda.empty_cache()  # clears GPU memory (this line will be more important later on!)
+    return t.stack(result, dim=0)
+
+
+def display_video(distances: Float[Tensor, "frames y z"]):
+    """
+    Displays video of raytracing results, using Plotly. `distances` is a tensor where the [i, y, z]
+    element is distance to the closest triangle for the i-th frame & the [y, z]-th ray in our 2D
+    grid of rays.
+    """
+    px.imshow(
+        distances,
+        animation_frame=0,
+        origin="lower",
+        zmin=0.0,
+        zmax=distances[distances.isfinite()].quantile(0.99).item(),
+        color_continuous_scale="viridis_r",  # "Brwnyl"
+    ).update_layout(coloraxis_showscale=False, width=550, height=600, title="Raytrace mesh video").show()
+
+
+num_pixels_y = 250
+num_pixels_z = 250
+y_limit = z_limit = 0.8
+num_frames = 50
+
+rays = make_rays_2d(num_pixels_y, num_pixels_z, y_limit, z_limit)
+rays[:, 0] = t.tensor([-3.0, 0.0, 0.0])
+dists = raytrace_mesh_video(rays, triangles, rotation_matrix, raytrace_mesh, num_frames)
+dists = einops.rearrange(dists, "frames (y z) -> frames y z", y=num_pixels_y)
+
+display_video(dists)
+
+# %%
+def raytrace_mesh_gpu(
+    rays: Float[Tensor, "nrays rayPoints=2 dims=3"],
+    triangles: Float[Tensor, "ntriangles trianglePoints=3 dims=3"],
+) -> Float[Tensor, " nrays"]:
+    """
+    For each ray, return the distance to the closest intersecting triangle, or infinity.
+
+    All computations should be performed on the GPU.
+    """
+    device = t.device("mps" if t.backends.mps.is_available() else "cpu")
+    rays = rays.to(device)
+    triangles = triangles.to(device)
+
+    num_rays = rays.shape[0]
+    num_triangles = triangles.shape[0]
+
+    triangles = einops.repeat(triangles, "num_triangles corners xyz -> num_rays num_triangles corners xyz", num_rays=num_rays)
+
+    assert triangles.shape == (num_rays, num_triangles, 3, 3)
+
+    A = triangles[:, :, 0]
+    B = triangles[:, :, 1]
+    C = triangles[:, :, 2]
+    assert C.shape == (num_rays, num_triangles, 3), f"Expected shape ({num_triangles}, 3), got {C.shape}"
+
+    O = rays[:, 0]
+    D = rays[:, 1]
+    O = einops.repeat(O, "num_rays xyz -> num_rays num_triangles xyz", num_triangles=num_triangles)
+    D = einops.repeat(D, "num_rays xyz -> num_rays num_triangles xyz", num_triangles=num_triangles)
+
+    assert O.shape == (num_rays, num_triangles, 3)
+    assert D.shape == (num_rays, num_triangles, 3)
+
+    c1 = D
+    assert c1.shape == (num_rays, num_triangles, 3)
+    c2 = A - B
+    c3 = A - C
+
+    matrix = t.stack((c1, c2, c3), dim=-1)
+    determinants = t.linalg.det(matrix)
+    assert determinants.shape == (num_rays, num_triangles)
+    not_invertible: Bool[Tensor, "num_rays num_triangles"] = t.abs(determinants) < 1e-6
+    matrix[not_invertible] = t.eye(3).to(device) # replace these with an identity matrix for now, we'll remove them later
+
+    target: Float[Tensor, "num_rays num_triangles 3"] = A - O
+    assert target.shape == (num_rays, num_triangles, 3)
+
+    suv: Float[Tensor, "num_rays num_triangles 3"] = t.linalg.solve(matrix, target)
+    s, u, v = suv.unbind(-1)
+    assert s.shape == (num_rays, num_triangles)
+
+    # Scale s by Dx to get the distance along ray
+    x_distance = s * D[..., 0]
+
+    intersections: Bool[Tensor, "num_rays num_triangles"] = ~not_invertible & (s >= 0) & (u >= 0) & (v >= 0) & (u + v <= 1) 
+    x_distance[~intersections] = float("inf") 
+
+    result = einops.reduce(x_distance, "num_rays num_triangles -> num_rays", "min")
+    return result.to(t.device("cpu"))
+
+dists = raytrace_mesh_video(rays, triangles, rotation_matrix, raytrace_mesh_gpu, num_frames)
+dists = einops.rearrange(dists, "frames (y z) -> frames y z", y=num_pixels_y)
+display_video(dists)
 # %%
