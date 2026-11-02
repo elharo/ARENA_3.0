@@ -443,7 +443,7 @@ class BatchNorm2d(nn.Module):
         self.register_buffer("running_var", t.ones(num_features))
         self.register_buffer("num_batches_tracked", t.tensor(0))
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x: Float[Tensor, "batch channels height width"]) -> Float[Tensor, "batch channels height width"]:
         """
         Normalize each channel.
 
@@ -457,12 +457,22 @@ class BatchNorm2d(nn.Module):
 
         if self.training:
             # Use this data's mean & variance to normalize, then use it to update the buffers
-            pass
+            mean = x.mean(dim=(0, 2, 3))
+            variance = x.var(dim=(0, 2, 3), correction=0)
+            normalized_x = (x - mean.reshape(1, -1, 1, 1)) / (variance.reshape(1, -1, 1, 1) + self.eps).sqrt()
+            with t.no_grad():
+                variance_unbiased = x.var(dim=(0, 2, 3), correction=1)
+                self.running_mean = (1 - self.momentum) * self.running_mean + self.momentum * mean
+                self.running_var = (1 - self.momentum) * self.running_var + self.momentum * variance_unbiased
+                self.num_batches_tracked += 1
         else:
             # Use the buffer mean & variance to normalize
-            pass
+            buffer_mean = self.running_mean.reshape(1, -1, 1, 1)
+            buffer_variance = self.running_var.reshape(1, -1, 1, 1)
+            normalized_x = (x - buffer_mean) / (buffer_variance + self.eps).sqrt()
 
-        raise NotImplementedError()
+        transformed_x = normalized_x * self.weight.T.reshape(1, -1, 1, 1) + self.bias.T.reshape(1, -1, 1, 1)
+        return transformed_x
 
     def extra_repr(self) -> str:
         raise NotImplementedError()
@@ -472,3 +482,104 @@ tests.test_batchnorm2d_module(BatchNorm2d)
 tests.test_batchnorm2d_forward(BatchNorm2d)
 tests.test_batchnorm2d_running_mean(BatchNorm2d)
 tests.test_batchnorm2d_running_stats_detached(BatchNorm2d)
+
+# %%
+class AveragePool(nn.Module):
+    def forward(self, x: Tensor) -> Tensor:
+        """
+        x: shape (batch, channels, height, width)
+        Return: shape (batch, channels)
+        """
+
+        return t.mean(x, dim=(2, 3))
+
+tests.test_averagepool(AveragePool)
+
+# %%
+class ResidualBlock(nn.Module):
+    def __init__(self, in_feats: int, out_feats: int, first_stride=1):
+        """
+        A single residual block with optional downsampling.
+
+        For compatibility with the pretrained model, declare the left side branch first using a
+        `Sequential`.
+
+        If first_stride is > 1, this means the optional (conv + bn) should be present on the right
+        branch. Declare it second using another `Sequential`.
+        """
+        super().__init__()
+
+        # Note - unless otherwise noted, you should assume convolutions have kernel_size=3, stride=1, padding=1 
+        # (this is a shape preserving convolution i.e. the width & height of the input and output will be the same).
+        # None of the convolutions have biases.
+        is_shape_preserving = (first_stride == 1) and (in_feats == out_feats)  # determines if right branch is identity
+
+        self.left = Sequential(
+            Conv2d(in_feats, out_feats, kernel_size=3, stride=first_stride, padding=1), # stridedconv
+            BatchNorm2d(num_features=out_feats),
+            ReLU(),
+            Conv2d(out_feats, out_feats, kernel_size=3, stride=1, padding=1),
+            BatchNorm2d(num_features=out_feats),
+        )
+
+        if is_shape_preserving:
+            self.right = nn.Identity()
+        else:
+            self.right = Sequential(
+                Conv2d(in_feats, out_feats, kernel_size=1, stride=first_stride, padding=0), # stridedconv 
+                BatchNorm2d(num_features=out_feats),
+            )
+        self.relu = ReLU()
+  
+
+    def forward(self, x: Tensor) -> Tensor:
+        """
+        Compute the forward pass. If no downsampling block is present, the addition should just add
+        the left branch's output to the input.
+
+        x: shape (batch, in_feats, height, width)
+
+        Return: shape (batch, out_feats, height / stride, width / stride)
+        """
+
+        result = self.left(x) + self.right(x)
+        result = self.relu(result)
+
+        return result
+
+
+tests.test_residual_block(ResidualBlock)
+
+
+# %%
+#
+
+class BlockGroup(nn.Module):
+    def __init__(self, n_blocks: int, in_feats: int, out_feats: int, first_stride=1):
+        """
+        An n_blocks-long sequence of ResidualBlock where only the first block uses the provided
+        stride.
+        """
+        super().__init__()
+
+        blocks = [ResidualBlock(in_feats=in_feats, out_feats=out_feats, first_stride=first_stride)]
+        for _ in range(n_blocks - 1):
+            blocks.append(ResidualBlock(out_feats, out_feats))
+
+        self.sequence = Sequential(*blocks)
+    
+    def forward(self, x: Tensor) -> Tensor:
+        """
+        Compute the forward pass.
+
+        x: shape (batch, in_feats, height, width)
+
+        Return: shape (batch, out_feats, height / first_stride, width / first_stride)
+        """
+        return self.sequence(x)
+
+
+tests.test_block_group(BlockGroup)
+
+
+# %%
