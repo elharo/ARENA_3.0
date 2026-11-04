@@ -583,3 +583,174 @@ tests.test_block_group(BlockGroup)
 
 
 # %%
+class ResNet34(nn.Module):
+    def __init__(
+        self,
+        n_blocks_per_group=[3, 4, 6, 3],
+        out_features_per_group=[64, 128, 256, 512],
+        first_strides_per_group=[1, 2, 2, 2],
+        n_classes=1000,
+    ):
+        super().__init__()
+        out_feats0 = 64
+        self.n_blocks_per_group = n_blocks_per_group
+        self.out_features_per_group = out_features_per_group
+        self.first_strides_per_group = first_strides_per_group
+        self.n_classes = n_classes
+
+        self.in_layers = Sequential(
+            Conv2d(3, out_feats0, kernel_size=7, stride=2, padding=3),
+            BatchNorm2d(out_feats0),
+            ReLU(),
+            MaxPool2d(kernel_size=3, stride=2, padding=1),
+        )
+
+        residual_layers = []
+        for i in range(len(n_blocks_per_group)):
+            residual_layers.append(
+                BlockGroup(
+                    n_blocks=n_blocks_per_group[i],
+                    in_feats=[64, *self.out_features_per_group][i],
+                    out_feats=self.out_features_per_group[i],
+                    first_stride=self.first_strides_per_group[i],
+                )
+            )
+        self.residual_layers = Sequential(*residual_layers)
+
+        self.out_layers = Sequential(
+            AveragePool(),
+            Linear(out_features_per_group[-1], n_classes),
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        """
+        x: shape (batch, channels, height, width)
+        Return: shape (batch, n_classes)
+        """
+        post_first_conv_block = self.in_layers(x)
+        post_block_groups = self.residual_layers(post_first_conv_block)
+        logits = self.out_layers(post_block_groups)
+        return logits
+
+
+
+my_resnet = ResNet34()
+
+# (1) Test via helper function `print_param_count`
+target_resnet = models.resnet34()  # without supplying a `weights` argument, we just initialize with random weights
+utils.print_param_count(my_resnet, target_resnet)
+
+# (2) Test via `torchinfo.summary`
+print("My model:", torchinfo.summary(my_resnet, input_size=(1, 3, 64, 64)), sep="\n")
+print(
+    "\nReference model:",
+    torchinfo.summary(target_resnet, input_size=(1, 3, 64, 64), depth=2),
+    sep="\n",
+)
+
+# %%
+
+resnet = models.resnet34()
+utils.print_param_count(resnet, resnet)
+print(torchinfo.summary(resnet, input_size=(1, 3, 64, 64)))
+
+# %%
+
+def copy_weights(my_resnet: ResNet34, pretrained_resnet: models.resnet.ResNet) -> ResNet34:
+    """Copy over the weights of `pretrained_resnet` to your resnet."""
+
+    # Get the state dictionaries for each model, check they have the same number of parameters &
+    # buffers
+    mydict = my_resnet.state_dict()
+    pretraineddict = pretrained_resnet.state_dict()
+    assert len(mydict) == len(pretraineddict), "Mismatching state dictionaries."
+
+    # Define a dictionary mapping the names of your parameters / buffers to their values in the
+    # pretrained model
+    state_dict_to_load = {
+        mykey: pretrainedvalue
+        for (mykey, myvalue), (pretrainedkey, pretrainedvalue) in zip(mydict.items(), pretraineddict.items())
+    }
+
+    # Load in this dictionary to your model
+    my_resnet.load_state_dict(state_dict_to_load)
+
+    return my_resnet
+
+
+pretrained_resnet = models.resnet34(weights=models.ResNet34_Weights.IMAGENET1K_V1).to(device)
+my_resnet = copy_weights(my_resnet, pretrained_resnet).to(device)
+print("Weights copied successfully!")
+
+# %%
+IMAGE_FILENAMES = [
+    "chimpanzee.jpg",
+    "golden_retriever.jpg",
+    "platypus.jpg",
+    "frogs.jpg",
+    "fireworks.jpg",
+    "astronaut.jpg",
+    "iguana.jpg",
+    "volcano.jpg",
+    "goofy.jpg",
+    "dragonfly.jpg",
+]
+
+IMAGE_FOLDER = section_dir / "resnet_inputs"
+
+images = [Image.open(IMAGE_FOLDER / filename) for filename in IMAGE_FILENAMES]
+
+IMAGE_SIZE = 224
+IMAGENET_MEAN = [0.485, 0.456, 0.406]
+IMAGENET_STD = [0.229, 0.224, 0.225]
+
+IMAGENET_TRANSFORM = transforms.Compose(
+    [
+        transforms.ToImage(),
+        transforms.ToDtype(t.float32, scale=True),
+        transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+        transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
+    ]
+)
+
+prepared_images = t.stack([IMAGENET_TRANSFORM(img) for img in images], dim=0).to(device)
+assert prepared_images.shape == (len(images), 3, IMAGE_SIZE, IMAGE_SIZE)
+
+
+# %%
+@t.inference_mode()
+def predict(
+    model: nn.Module, images: Float[Tensor, "batch rgb h w"]
+) -> tuple[Float[Tensor, " batch"], Int[Tensor, " batch"]]:
+    """
+    Returns the maximum probability and predicted class for each image, as a tensor of floats and
+    ints respectively.
+    """
+    model.eval()
+    logits = model(images)
+
+    print(logits.shape)
+    probabilities = logits.softmax(dim=-1)
+    return probabilities.max(dim=-1)
+
+with open(section_dir / "imagenet_labels.json") as f:
+    imagenet_labels = list(json.load(f).values())
+
+# Check your predictions match those of the pretrained model
+my_probs, my_predictions = predict(my_resnet, prepared_images)
+pretrained_probs, pretrained_predictions = predict(pretrained_resnet, prepared_images)
+assert (my_predictions == pretrained_predictions).all()
+t.testing.assert_close(my_probs, pretrained_probs, atol=5e-4, rtol=0)  # tolerance of 0.05%
+print("All predictions match!")
+
+# Print out your predictions, next to the corresponding images
+for i, img in enumerate(images):
+    table = Table("Model", "Prediction", "Probability")
+    table.add_row("My ResNet", imagenet_labels[my_predictions[i]], f"{my_probs[i]:.3%}")
+    table.add_row(
+        "Reference Model",
+        imagenet_labels[pretrained_predictions[i]],
+        f"{pretrained_probs[i]:.3%}",
+    )
+    rprint(table)
+    display(img)
