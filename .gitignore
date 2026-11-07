@@ -3,6 +3,7 @@
 
 # Python Environment & Dependencies
 .venv
+.env
 .direnv
 
 # Python Cache & Build Artifacts
