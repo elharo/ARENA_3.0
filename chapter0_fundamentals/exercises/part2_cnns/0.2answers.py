@@ -754,3 +754,108 @@ for i, img in enumerate(images):
     )
     rprint(table)
     display(img)
+
+# %%
+# Images in [0, 1], without normalization
+scale_to_unit_range = transforms.Compose([
+    transforms.ToImage(),
+    transforms.ToDtype(t.float32, scale=True),
+    transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+])
+original_images: Float[Tensor, "batch rgb h w"] = t.stack([scale_to_unit_range(img) for img in images]).to(device)
+
+
+class Normalized(nn.Module):
+    """Applies ImageNet normalization inside the model so inputs live in [0, 1]."""
+    def __init__(self, model: nn.Module, mean, std):
+        super().__init__()
+        self.model = model
+        self.register_buffer("mean", t.tensor(mean).view(1, 3, 1, 1))
+        self.register_buffer("std", t.tensor(std).view(1, 3, 1, 1))
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.model((x - self.mean) / self.std)
+
+
+def fgsm(
+    model: nn.Module,
+    original_images: Float[Tensor, "batch rgb h w"],
+    class_indices: Int[Tensor, " batch"],
+    eps: float,
+    targeted: bool = False,
+) -> Float[Tensor, "batch rgb h w"]:
+    """Perturb images with the Fast Gradient Sign Method (one step).
+
+    Each element of the result differs from the input by at most `eps`. For an
+    untargeted attack the step increases the cross-entropy loss for
+    `class_indices`; for a targeted attack it decreases it.
+
+    Args:
+        model: Maps images in [0, 1] to logits of shape (batch, n_classes).
+            Put into eval mode by this function.
+        original_images: Clean images, shape (batch, rgb, h, w), values in [0, 1].
+        class_indices: ImageNet class indices, shape (batch,). Classes to move
+            away from if `targeted` is False, or toward if it is True.
+        eps: Maximum per-element change (L-infinity bound), in the units of
+            `original_images`.
+        targeted: If True, decrease the loss for `class_indices` instead of
+            increasing it.
+
+    Returns:
+        Adversarial images with the same shape and dtype as `original_images`,
+        values clamped to [0, 1], detached from the autograd graph.
+    """
+    model.eval()
+    images_requiring_grad: Float[Tensor, "batch rgb h w"] = original_images.clone().detach().requires_grad_(True)
+    logits: Float[Tensor, "batch n_classes"] = model(images_requiring_grad) # raw output before softmax
+    loss: Float[Tensor, ""] = F.cross_entropy(logits, class_indices)
+    (grad,) = t.autograd.grad(loss, images_requiring_grad)
+    noise: Float[Tensor, "batch rgb h w"]  = eps * grad.sign()
+    adversarial_images: Float[Tensor, "batch rgb h w"] = original_images + (-noise if targeted else noise)
+    return adversarial_images.clamp(0, 1).detach()
+
+
+def tensor_to_pil(image: Float[Tensor, "rgb h w"]) -> Image.Image:
+    """Convert a float image in [0, 1] to an 8-bit PIL image, rounding to nearest."""
+    as_uint8 = (image.detach().clamp(0, 1) * 255).round().to(t.uint8).cpu()
+    return TF.to_pil_image(as_uint8)
+
+
+target_model = Normalized(my_resnet, IMAGENET_MEAN, IMAGENET_STD).to(device)
+with t.no_grad():
+    clean_predictions = target_model(original_images).argmax(-1)
+
+eps = 4 / 255
+noisy_images: Float[Tensor, "batch rgb h w"] = fgsm(target_model, original_images, clean_predictions, eps=eps)
+
+with t.no_grad():
+    adversarial_logits = target_model(noisy_images)
+    adversarial_predictions = adversarial_logits.argmax(-1)
+    adversarial_probabilities = adversarial_logits.softmax(-1).max(-1).values
+
+
+delta = noisy_images - original_images
+print(f"max |delta|: {delta.abs().max().item():.6f}  (eps = {eps:.6f})")
+print(f"x_adversarial range: [{noisy_images.min().item():.3f}, {noisy_images.max().item():.3f}]")
+assert delta.abs().max() <= eps + 1e-6
+assert noisy_images.min() >= 0 and noisy_images.max() <= 1
+
+# Clean vs adversarial predictions
+with t.no_grad():
+    clean_probs = target_model(original_images).softmax(-1).max(-1).values
+
+from torchvision.transforms.v2 import functional as TF
+
+for i in range(len(images)):
+    table = Table("", "Prediction", "Probability")
+    table.add_row("Clean", imagenet_labels[clean_predictions[i]], f"{clean_probs[i]:.3%}")
+    table.add_row("FGSM", imagenet_labels[adversarial_predictions[i]], f"{adversarial_probabilities[i]:.3%}")
+    rprint(table)
+    display(tensor_to_pil(original_images[i]))   # clean, 224x224
+    display(tensor_to_pil(noisy_images[i]))
+    perturbation = noisy_images[i] - original_images[i]    # in [-eps, +eps]
+    display(tensor_to_pil(perturbation / (2 * eps) + 0.5)) # 0.5 = no change  
+
+success = (adversarial_predictions != clean_predictions).float().mean().item()
+print(f"Attack success rate (prediction changed): {success:.0%}")
+# %%
