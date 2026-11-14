@@ -61,7 +61,7 @@ import math
 class Linear(nn.Module):
     def __init__(self, num_in_features: int, num_out_features: int, bias=True):
         """
-        A simple linear (technically, affine) transformation.
+        A simple affine transformation.
 
         The fields should be named `weight` and `bias` for compatibility with PyTorch.
         If `bias` is False, set `self.bias` to None.
@@ -99,7 +99,7 @@ class Linear(nn.Module):
         return result
 
     def extra_repr(self) -> str:
-        return f"in_features={self.in_features}, out_features={self.out_features}, bias={self.bias is not None}"
+        return f"in_features={self.num_in_features}, out_features={self.num_out_features}, bias={self.bias is not None}"
 
 
 tests.test_linear_parameters(Linear, bias=False)
