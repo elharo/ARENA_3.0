@@ -755,7 +755,16 @@ for i, img in enumerate(images):
     rprint(table)
     display(img)
 
+
+
+# %% [markdown]
+
+# ## FGSM exercise
+# This next one isn't part of the Arena exercises. This is something I worked out and added
+# with the help of Claude to epxlore the use of FGSM
+
 # %%
+
 # Images in [0, 1], without normalization
 scale_to_unit_range = transforms.Compose([
     transforms.ToImage(),
@@ -851,10 +860,15 @@ for i in range(len(images)):
     table.add_row("Clean", imagenet_labels[clean_predictions[i]], f"{clean_probs[i]:.3%}")
     table.add_row("FGSM", imagenet_labels[adversarial_predictions[i]], f"{adversarial_probabilities[i]:.3%}")
     rprint(table)
-    display(tensor_to_pil(original_images[i]))   # clean, 224x224
-    display(tensor_to_pil(noisy_images[i]))
-    perturbation = noisy_images[i] - original_images[i]    # in [-eps, +eps]
-    display(tensor_to_pil(perturbation / (2 * eps) + 0.5)) # 0.5 = no change  
+    clean_image: Float[Tensor, "rgb h w"] = original_images[i]
+    noisy_image: Float[Tensor, "rgb h w"] = noisy_images[i]
+    perturbation: Float[Tensor, "rgb h w"] = noisy_image - clean_image   # values in [-eps, +eps]
+    perturbation_visible: Float[Tensor, "rgb h w"] = perturbation / (2 * eps) + 0.5  # 0.5 = no change
+
+    side_by_side: Float[Tensor, "rgb h w3"] = t.cat(
+        [clean_image, noisy_image, perturbation_visible], dim=-1
+    )
+    display(tensor_to_pil(side_by_side))
 
 success = (adversarial_predictions != clean_predictions).float().mean().item()
 print(f"Attack success rate (prediction changed): {success:.0%}")
